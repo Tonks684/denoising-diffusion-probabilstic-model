@@ -23,6 +23,7 @@ import math
 import copy
 from pathlib import Path
 from random import random
+import random
 from functools import partial
 from collections import namedtuple
 from multiprocessing import cpu_count
@@ -92,14 +93,14 @@ def convert_image_to_fn(img_type, image):
 
 # normalization functions
 
-def normalize_to_neg_one_to_one(img):
-    return img * 2 - 1
+# def normalize_to_neg_one_to_one(img):
+#     return img * 2 - 1
 
-def unnormalize_to_zero_to_one(t):
-    return (t + 1) * 0.5
+# def unnormalize_to_zero_to_one(t):
+#     return (t + 1) * 0.5
 
-def normalize_16bit_image_to_zero_to_one(img):
-    return img.point(lambda p: p*(1/65535.0))
+# def normalize_16bit_image_to_zero_to_one(img):
+#     return img.point(lambda p: p*(1/65535.0))
 
 def unnormalize_tensor_to_img(
         image_tensor, imtype=np.uint16,normalise=True,
@@ -110,28 +111,13 @@ def unnormalize_tensor_to_img(
             image_numpy.append(
                 unnormalize_tensor_to_img(image_tensor[i,:,:,:])
             )
-            # print(f'inloop_{image_numpy.shape}')
         return image_numpy
 
-    if isinstance(image_tensor, list):
-        image_numpy = []
-        for i in range(len(image_tensor)):
-            image_numpy.append(
-                unnormalize_tensor_to_img(image_tensor[i])
-            )
-        return image_numpy
     image_numpy = image_tensor.cpu().float().numpy()
-    ## input shape is (bs,z,x,y)
-    # print(f'pre_norm_shape{image_numpy.shape} and {image_numpy.dtype}')
     if normalise:
-        # print('pre_unnorm')
-        # print(image_numpy)
         image_numpy = np.transpose(image_numpy, (1, 2, 0)) * 65535.0
-        # print('post_unnorm')
-        # print(image_numpy)
-    # image_numpy = np.clip(image_numpy, 0, 65535.0)
-    if image_numpy.shape[2] == 1 or image_numpy.shape[2] > 3:
-        image_numpy = image_numpy[:, :, 0]
+    # if image_numpy.shape[2] == 1 or image_numpy.shape[2] > 3:
+    #     image_numpy = image_numpy[:, :, 0]
     return image_numpy.astype(imtype)
 
 
@@ -553,8 +539,9 @@ class GaussianDiffusion(nn.Module):
         p2_loss_weight_gamma = 0., # p2 loss weight, from https://arxiv.org/abs/2204.00227 - 0 is equivalent to weight of 1 across time - 1. is recommended
         p2_loss_weight_k = 1,
         ddim_sampling_eta = 0.,
-        auto_normalize = True,
+        auto_normalize = False,
         x_self_cond = None,
+        original_image_size=1080,
     ):
         super().__init__()
         assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
@@ -568,7 +555,7 @@ class GaussianDiffusion(nn.Module):
         self.image_size = image_size
 
         self.objective = objective
-
+        self.original_image_size = original_image_size
         assert objective in {'pred_noise', 'pred_x0', 'pred_v'}, \
             'objective must be either pred_noise (predict noise) or pred_x0 ' \
             '(predict image start) or pred_v (predict v [v-parameterization ' \
@@ -650,7 +637,7 @@ class GaussianDiffusion(nn.Module):
         
         self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity
         self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity
-        self.tensor2img = unnormalize_tensor_to_img if auto_normalize else identity
+        self.tensor2img = unnormalize_tensor_to_img 
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
@@ -755,7 +742,7 @@ class GaussianDiffusion(nn.Module):
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
         
-        ret_0to1 = self.unnormalize(ret)
+        # ret_0to1 = self.unnormalize(ret)
         ret_16bit = self.tensor2img(ret_0to1)
 
         return ret_16bit
@@ -909,21 +896,23 @@ class Dataset(Dataset):
         image_size,
         exts = ['jpg', 'jpeg', 'png', 'tiff'],
         augment_horizontal_flip = False,
-        convert_image_to = None
+        convert_image_to = None,
+        original_image_size=1080
     ):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
+        self.original_image_size = original_image_size
         self.paths = [p for ext in exts for p in
                         Path(f'{folder}').glob(f'*.{ext}')]
 
-        maybe_convert_fn = partial(convert_image_to_fn, convert_image_to) if exists(convert_image_to) else nn.Identity()
-
         self.transform = T.Compose([
-            T.Lambda(maybe_convert_fn), # Identidy only as convert_image_to = None
-            T.Resize(image_size),
+            # Crop image
+            # T.Lambda(lambda img: __crop(img, params['crop_pos'],self.image_size)),
+            # T.Lambda(maybe_convert_fn), # Identidy only as convert_image_to = None
+            # T.Resize(image_size),
             # T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
-            T.CenterCrop(image_size),
+            T.RandomCrop(size=(image_size,image_size)),
             T.ToTensor(),
             T.Normalize((0.5,), (0.5,))
         ])
@@ -934,12 +923,9 @@ class Dataset(Dataset):
 
     def __getitem__(self, index):
         path = self.paths[index]
-        # img = Image.open(path)
         img = Image.open(path).convert('F')
-        img = normalize_16bit_image_to_zero_to_one(img)
-        x = self.transform(img)
-        return x
-
+        img = img.point(lambda p: p*(1/65535))
+        return self.transform(img)
 
 # trainer class
 
@@ -1008,14 +994,15 @@ class Trainer(object):
 
         self.train_num_steps = train_num_steps
         self.image_size = diffusion_model.image_size
-
+        self.original_image_size = diffusion_model.original_image_size
         # dataset and dataloader
 
         self.ds_A = Dataset(
             folder_A,
             self.image_size,
             augment_horizontal_flip = augment_horizontal_flip,
-            convert_image_to = convert_image_to
+            convert_image_to = convert_image_to,
+            original_image_size=self.original_image_size
         )
         self.ds_B = Dataset(
             folder_B,
@@ -1036,7 +1023,8 @@ class Trainer(object):
             folder_B,
             self.image_size,
             augment_horizontal_flip = augment_horizontal_flip,
-            convert_image_to = convert_image_to
+            convert_image_to = convert_image_to,
+            original_image_size=self.original_image_size
         )
         dl_B = DataLoader(self.ds_B,
                         batch_size = train_batch_size,

@@ -46,7 +46,8 @@ diffusion = GaussianDiffusion(
     image_size = image_size,
     timesteps = timesteps,           # number of steps
     sampling_timesteps = 1,   # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
-    loss_type = 'l1'            # L1 or L2
+    loss_type = 'l1',            # L1 or L2
+    original_image_size = 1080
 )
 
 trainer = Trainer(
