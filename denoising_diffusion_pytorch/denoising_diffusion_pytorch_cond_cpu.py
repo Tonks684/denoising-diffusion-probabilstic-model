@@ -51,6 +51,7 @@ from pytorch_fid.fid_score import calculate_frechet_distance
 from version import __version__
 import wandb
 wandb.init()
+
 # constants
 
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
@@ -98,7 +99,7 @@ def unnormalize_to_zero_to_one(t):
     return (t + 1) * 0.5
 
 def normalize_16bit_image_to_zero_to_one(img):
-    return img.point(lambda p: p*(1/28000.0))
+    return img.point(lambda p: p*(1/65535.0))
 
 def unnormalize_tensor_to_img(
         image_tensor, imtype=np.uint16,normalise=True,
@@ -125,7 +126,7 @@ def unnormalize_tensor_to_img(
     if normalise:
         # print('pre_unnorm')
         # print(image_numpy)
-        image_numpy = np.transpose(image_numpy, (1, 2, 0)) * 28000.0
+        image_numpy = np.transpose(image_numpy, (1, 2, 0)) * 65535.0
         # print('post_unnorm')
         # print(image_numpy)
     # image_numpy = np.clip(image_numpy, 0, 65535.0)
@@ -450,8 +451,11 @@ class Unet(nn.Module):
 
     def forward(self, x, time, cond_A = None):
         if self.self_condition:
+            # condition on cond_A but x shape is bs, ch,x,y so cond_A needs to be of shape bs,w,h
+            print(x.shape)
             x_self_cond = default(cond_A, lambda: torch.zeros_like(x))
-            x = torch.cat((x_self_cond, x), dim = 1)
+            print(x_self_cond.shape)
+            x = torch.cat([x_self_cond, x], dim = 1)
 
         x = self.init_conv(x)
         r = x.clone()
@@ -707,7 +711,7 @@ class GaussianDiffusion(nn.Module):
 
         return ModelPrediction(pred_noise, x_start)
 
-    def p_mean_variance(self, x, t, cat_A_xstart = None, clip_denoised = True):
+    def p_mean_variance(self, x, t, cat_A_xstart = None, clip_denoised = False):
         preds = self.model_predictions(x, t, cat_A_xstart)
         x_start = preds.pred_x_start
 
@@ -920,7 +924,8 @@ class Dataset(Dataset):
             T.Resize(image_size),
             # T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
             T.CenterCrop(image_size),
-            T.ToTensor()
+            T.ToTensor(),
+            T.Normalize((0.5,), (0.5,))
         ])
         
 
@@ -929,15 +934,10 @@ class Dataset(Dataset):
 
     def __getitem__(self, index):
         path = self.paths[index]
-        print(f'path: {path}')
         # img = Image.open(path)
         img = Image.open(path).convert('F')
         img = normalize_16bit_image_to_zero_to_one(img)
-        print(f'0 to 1 PIL Image - Max {np.max(img)} and Min: {np.min(img)}')
-        print(np.array(img))
         x = self.transform(img)
-        print(f'-1 to 1 Tensor:- Max {x.max()} and Min: {x.min()}')
-        print(x)
         return x
 
 
@@ -966,9 +966,13 @@ class Trainer(object):
         split_batches = True,
         convert_image_to = None,
         calculate_fid = True,
-        inception_block_idx = 2048
+        inception_block_idx = 2048,
+        config=None
     ):
         super().__init__()
+
+        #wandb config and init
+        wandb.init(config=config)
 
         # accelerator
 
@@ -1009,6 +1013,12 @@ class Trainer(object):
 
         self.ds_A = Dataset(
             folder_A,
+            self.image_size,
+            augment_horizontal_flip = augment_horizontal_flip,
+            convert_image_to = convert_image_to
+        )
+        self.ds_B = Dataset(
+            folder_B,
             self.image_size,
             augment_horizontal_flip = augment_horizontal_flip,
             convert_image_to = convert_image_to
@@ -1074,6 +1084,7 @@ class Trainer(object):
             'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
             'version': __version__
         }
+        wandb.config(data)
 
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
 
@@ -1163,21 +1174,32 @@ class Trainer(object):
                             milestone = self.step // self.save_and_sample_every
                             batches = num_to_groups(self.num_samples, self.batch_size)
                             # all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=1), batches))
-                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=1,cond_A=data_A),[2]))
-                        for item in all_images_list:
-                            for i in item:
-                                print(f'list item {np.asarray(i).shape} item dtype {i.dtype}')
+                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=self.batch_size,cond_A=data_A),[2]))
+                        # for item in all_images_list:
+                        #     for i in item:
+                        #         print(f'list item {np.asarray(i).shape} item dtype {i.dtype}')
                         # all_images = torch.cat(all_images_list, dim = 0)
-                        imsave(self.results_folder / f'sample-{milestone}.tiff', all_images_list[0][0].astype(np.float32), imagej=True)
-                
-                        self.save(milestone)
-                        print(all_images_list[0][0])
-                        
-                        wandb.log({'Input': wandb.Image(data_A)})
-                        wandb.log({'Target': wandb.Image(data_B)})
-                        wandb.log({f'Sample_target': wandb.Image(all_images_list[0][0])},step=milestone)
-
-
+                        # imsave(self.results_folder / f'sample-{milestone}.tiff', all_images_list[0][0][1].astype(np.float32), imagej=True)
+            
+                        # self.save(milestone)
+                        # print(all_images_list[0][0])
+                        print(all_images_list[0][0].shape)
+                        # Save Media
+                        wandb.log({'Input1': wandb.Image(data_A[0])})
+                        wandb.log({'Target1': wandb.Image(data_B[0])})
+                        wandb.log({'Sample_target1': wandb.Image(all_images_list[0][0])})
+                        wandb.log({'Input2': wandb.Image(data_A[1])})
+                        wandb.log({'Target2': wandb.Image(data_B[1])})
+                        wandb.log({'Sample_target2': wandb.Image(all_images_list[0][1])})
+                        # Save config
+                        # data = {
+                        #     'step': self.step,
+                        #     'model': self.accelerator.get_state_dict(self.model),
+                        #     'opt': self.opt.state_dict(),
+                        #     'ema': self.ema.state_dict(),
+                        #     'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
+                        #         }
+                        # wandb.config.update(data)
                         # whether to calculate fid
 
                         if exists(self.inception_v3):
@@ -1185,6 +1207,7 @@ class Trainer(object):
                             accelerator.print(f'fid_score: {fid_score}')
                             wandb.log({'fid':fid_score})
                         
+
 
                 pbar.update(1)
 

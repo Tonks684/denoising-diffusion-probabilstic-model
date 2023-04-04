@@ -5,12 +5,12 @@ from random import random
 from functools import partial
 from collections import namedtuple
 from multiprocessing import cpu_count
-
+import numpy as np
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-
+from tifffile import imsave
 from torch.optim import Adam
 
 from torchvision import transforms as T, utils
@@ -20,7 +20,7 @@ from einops.layers.torch import Rearrange
 
 from PIL import Image
 from tqdm.auto import tqdm
-from ema_pytorch import EMA
+from ema_pytorch import EMA #Exponential moving average
 
 from accelerate import Accelerator
 
@@ -28,7 +28,7 @@ from pytorch_fid.inception import InceptionV3
 from pytorch_fid.fid_score import calculate_frechet_distance
 
 from denoising_diffusion_pytorch.version import __version__
-
+import wandb
 # constants
 
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
@@ -75,6 +75,32 @@ def normalize_to_neg_one_to_one(img):
 def unnormalize_to_zero_to_one(t):
     return (t + 1) * 0.5
 
+def normalize_16bit_image_to_zero_to_one(img):
+    return img.point(lambda p: p*(1/65535.0))
+
+def unnormalize_tensor_to_img(
+        image_tensor, imtype=np.uint16,normalise=True,
+        stack_predictions=False):
+    if isinstance(image_tensor, list):
+        image_numpy = []
+        for i in range(len(image_tensor)):
+            image_numpy.append(
+                unnormalize_tensor_to_img(image_tensor[i])
+            )
+        return image_numpy
+    image_numpy = image_tensor.cpu().float().numpy()
+    print(image_numpy.shape)
+    if normalise:
+        image_numpy = (np.transpose(image_numpy,
+                                    (1, 2, 0)) + 1) / 2.0 * 65535.0
+    else:
+        image_numpy = np.transpose(image_numpy, (1, 2, 0)) * 65535.0
+    image_numpy = np.clip(image_numpy, 0, 65535)
+    if image_numpy.shape[2] == 1 or image_numpy.shape[2] > 3:
+        image_numpy = image_numpy[:, :, 0]
+    return image_numpy.astype(imtype)
+
+
 # small helper modules
 
 class Residual(nn.Module):
@@ -93,6 +119,8 @@ def Upsample(dim, dim_out = None):
 
 def Downsample(dim, dim_out = None):
     return nn.Sequential(
+        # for the batch and channels split image into 4 and return
+        # number of images, flattened 4 sections, new_height, new_width
         Rearrange('b c (h p1) (w p2) -> b (c p1 p2) h w', p1 = 2, p2 = 2),
         nn.Conv2d(dim * 4, default(dim_out, dim), 1)
     )
@@ -101,6 +129,8 @@ class WeightStandardizedConv2d(nn.Conv2d):
     """
     https://arxiv.org/abs/1903.10520
     weight standardization purportedly works synergistically with group normalization
+
+    Replacement to standard Conv layer
     """
     def forward(self, x):
         eps = 1e-5 if x.dtype == torch.float32 else 1e-3
@@ -124,6 +154,9 @@ class LayerNorm(nn.Module):
         return (x - mean) * (var + eps).rsqrt() * self.g
 
 class PreNorm(nn.Module):
+    """
+    Used to apply groupnorm before the attention layer
+    """
     def __init__(self, dim, fn):
         super().__init__()
         self.fn = fn
@@ -134,8 +167,16 @@ class PreNorm(nn.Module):
         return self.fn(x)
 
 # sinusoidal positional embeds
+# parameters of NN are shared across time (noise level)
+# spe encode t (inspired by Transformers) makes NN "know" at which t it is operating, for every image in batch
+
 
 class SinusoidalPosEmb(nn.Module):
+    """
+    Takes tensor of shape (batch_size,1) as input (ie noise level of several noisy images  in batch
+    and turns into tensor of shape (btach_size,dim) with dim being dimensionality
+    of positional embedding. This is then added to each residual block.
+    """
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
@@ -213,6 +254,13 @@ class ResnetBlock(nn.Module):
         return h + self.res_conv(x)
 
 class LinearAttention(nn.Module):
+    """
+    dim_head: square root of dimensions(k)
+    heads: number of scaled-dot product attention heads
+    Difference compared to regular attention is the time and memory
+    constratins scaler linarly in the sequence length, as oppossed
+    to quadratically for regulaer attention
+    """
     def __init__(self, dim, heads = 4, dim_head = 32):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -227,7 +275,11 @@ class LinearAttention(nn.Module):
 
     def forward(self, x):
         b, c, h, w = x.shape
+        # query, key and value
+        # By performing a convolution2d on x and then splitting into chunks on batch
         qkv = self.to_qkv(x).chunk(3, dim = 1)
+        # Split image into parts based on self.heads
+        # Produce same index but x and y are concatenated
         q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads), qkv)
 
         q = q.softmax(dim = -2)
@@ -243,6 +295,10 @@ class LinearAttention(nn.Module):
         return self.to_out(out)
 
 class Attention(nn.Module):
+    """
+    Added inbetween conv blocks. Again building block from transformer
+    This attention is regular multi-head self-attention
+    """
     def __init__(self, dim, heads = 4, dim_head = 32):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -258,8 +314,11 @@ class Attention(nn.Module):
         q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads), qkv)
 
         q = q * self.scale
+        # 'b h d i' dimension of q (d is summattion index) (repeated indices inputs will be multiplied and products wil be outputs)
+        # 'b h d j' dimension of k (d is summattion index as it is not in the output)
+        # 'b h i j' dimension of sim (free indices)
 
-        sim = einsum('b h d i, b h d j -> b h i j', q, k)
+        sim = einsum('b h d i, b h d j -> b h i j', q, k) #
         attn = sim.softmax(dim = -1)
         out = einsum('b h i j, b h d j -> b h i d', attn, v)
 
@@ -275,8 +334,8 @@ class Unet(nn.Module):
         init_dim = None,
         out_dim = None,
         dim_mults=(1, 2, 4, 8),
-        channels = 3,
-        self_condition = False,
+        channels = 1,
+        self_condition = True, # Condition on BF
         resnet_block_groups = 8,
         learned_variance = False,
         learned_sinusoidal_cond = False,
@@ -400,7 +459,9 @@ class Unet(nn.Module):
 # gaussian diffusion trainer class
 
 def extract(a, t, x_shape):
+    # b here is total number of betas
     b, *_ = t.shape
+    # torch.gather gathers values along an axis specified by dim (-1) at index t
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
@@ -455,7 +516,8 @@ class GaussianDiffusion(nn.Module):
         p2_loss_weight_gamma = 0., # p2 loss weight, from https://arxiv.org/abs/2204.00227 - 0 is equivalent to weight of 1 across time - 1. is recommended
         p2_loss_weight_k = 1,
         ddim_sampling_eta = 0.,
-        auto_normalize = True
+        auto_normalize = True,
+        x_self_cond = None,
     ):
         super().__init__()
         assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
@@ -464,13 +526,18 @@ class GaussianDiffusion(nn.Module):
         self.model = model
 
         self.channels = self.model.channels
+        # Binary variable for self conditioning
         self.self_condition = self.model.self_condition
 
         self.image_size = image_size
 
         self.objective = objective
 
-        assert objective in {'pred_noise', 'pred_x0', 'pred_v'}, 'objective must be either pred_noise (predict noise) or pred_x0 (predict image start) or pred_v (predict v [v-parameterization as defined in appendix D of progressive distillation paper, used in imagen-video successfully])'
+        assert objective in {'pred_noise', 'pred_x0', 'pred_v'}, \
+            'objective must be either pred_noise (predict noise) or pred_x0 ' \
+            '(predict image start) or pred_v (predict v [v-parameterization ' \
+            'as defined in appendix D of progressive distillation paper, ' \
+            'used in imagen-video successfully])'
 
         if beta_schedule == 'linear':
             beta_schedule_fn = linear_beta_schedule
@@ -481,10 +548,17 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'unknown beta schedule {beta_schedule}')
 
-        betas = beta_schedule_fn(timesteps, **schedule_fn_kwargs)
+        # DDPM formulas
+        # q(xt|xt-1)= N(xt; sqrt(alpha_t)*xt-1,Beta_t*I)
+        # q(x1:T|x0)= cum_dot_product_1toT(q(xt|xt-1))
 
+        betas = beta_schedule_fn(timesteps, **schedule_fn_kwargs)
+        # Beta from 1 to T (change in variance schedule based on no. timesteps)
         alphas = 1. - betas
+        # .cumprod returns array at_1, at_1*at_2, at_1*at_2*at_3,...at_n! of all alphas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
+        # Padding last dimension by 1 on each side
+        # This alphas_cumprod up until T-1 then at T it is padded with 0s
         alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)
 
         timesteps, = betas.shape
@@ -508,12 +582,13 @@ class GaussianDiffusion(nn.Module):
         register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
 
         # calculations for diffusion q(x_t | x_{t-1}) and others
+        # q(xt|xt-1)= N(xt; sqrt(alpha_t)*xt-1,Beta_t*I)
 
-        register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
-        register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
-        register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
-        register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
-        register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
+        register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod)) # alpha_t above
+        register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod)) # 1 - alpha_t above. I thought it was 1 - beta which is alpha not 1 - alpha
+        register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))# log(1 - alpha)_t above
+        register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod)) # 1 /alpha_t above
+        register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))# 1 /alpha_t -1 above
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
 
@@ -537,6 +612,7 @@ class GaussianDiffusion(nn.Module):
 
         self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity
         self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity
+        self.tensor2img = unnormalize_tensor_to_img if auto_normalize else identity
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
@@ -572,6 +648,7 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def model_predictions(self, x, t, x_self_cond = None, clip_x_start = False, rederive_pred_noise = False):
+
         model_output = self.model(x, t, x_self_cond)
         maybe_clip = partial(torch.clamp, min = -1., max = 1.) if clip_x_start else identity
 
@@ -630,12 +707,13 @@ class GaussianDiffusion(nn.Module):
             imgs.append(img)
 
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
-
         ret = self.unnormalize(ret)
+        ret = self.tensor2img(ret)
+
         return ret
 
     @torch.no_grad()
-    def ddim_sample(self, shape, return_all_timesteps = False):
+    def ddim_sample(self, shape,return_all_timesteps = False):
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
 
         times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
@@ -674,6 +752,7 @@ class GaussianDiffusion(nn.Module):
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
 
         ret = self.unnormalize(ret)
+        ret = self.tensor2img(ret)
         return ret
 
     @torch.no_grad()
@@ -719,7 +798,7 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'invalid loss type {self.loss_type}')
 
-    def p_losses(self, x_start, t, noise = None):
+    def p_losses(self, x_start, t, x_self_cond=None, noise = None):
         b, c, h, w = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start))
 
@@ -731,11 +810,11 @@ class GaussianDiffusion(nn.Module):
         # and condition with unet with that
         # this technique will slow down training by 25%, but seems to lower FID significantly
 
-        x_self_cond = None
-        if self.self_condition and random() < 0.5:
-            with torch.no_grad():
-                x_self_cond = self.model_predictions(x, t).pred_x_start
-                x_self_cond.detach_()
+        # x_self_cond = None
+        # if self.self_condition and random() < 0.5:
+        #     with torch.no_grad():
+        #         x_self_cond = self.model_predictions(x, t).pred_x_start
+        #         x_self_cond.detach_()
 
         # predict and take gradient step
 
@@ -756,6 +835,7 @@ class GaussianDiffusion(nn.Module):
 
         loss = loss * extract(self.p2_loss_weight, t, loss.shape)
         return loss.mean()
+
 
     def forward(self, img, *args, **kwargs):
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
@@ -779,7 +859,8 @@ class Dataset(Dataset):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+        self.paths = [p for ext in exts for p in
+                        Path(f'{folder}').glob(f'*.{ext}')]
 
         maybe_convert_fn = partial(convert_image_to_fn, convert_image_to) if exists(convert_image_to) else nn.Identity()
 
@@ -796,7 +877,9 @@ class Dataset(Dataset):
 
     def __getitem__(self, index):
         path = self.paths[index]
-        img = Image.open(path)
+        # img = Image.open(path)
+        img = Image.open(path).convert('F')
+        img = normalize_16bit_image_to_zero_to_one(img)
         return self.transform(img)
 
 # trainer class
@@ -805,7 +888,8 @@ class Trainer(object):
     def __init__(
         self,
         diffusion_model,
-        folder,
+        folder_A,
+        folder_B,
         *,
         train_batch_size = 16,
         gradient_accumulate_every = 1,
@@ -817,9 +901,9 @@ class Trainer(object):
         adam_betas = (0.9, 0.99),
         save_and_sample_every = 1000,
         num_samples = 25,
-        results_folder = './results',
-        amp = False,
-        fp16 = False,
+        results_folder = None,
+        amp = True,
+        fp16 = True,
         split_batches = True,
         convert_image_to = None,
         calculate_fid = True,
@@ -831,7 +915,7 @@ class Trainer(object):
 
         self.accelerator = Accelerator(
             split_batches = split_batches,
-            mixed_precision = 'fp16' if fp16 else 'no'
+            mixed_precision = 'fp16' if fp16 else 'no',
         )
 
         self.accelerator.native_amp = amp
@@ -864,11 +948,37 @@ class Trainer(object):
 
         # dataset and dataloader
 
-        self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
-        dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+        self.ds_A = Dataset(
+            folder_A,
+            self.image_size,
+            augment_horizontal_flip = augment_horizontal_flip,
+            convert_image_to = convert_image_to
+        )
+        dl_A = DataLoader(self.ds_A,
+                        batch_size = train_batch_size,
+                        shuffle = True,
+                        pin_memory = True,
+                        num_workers = 1)
 
-        dl = self.accelerator.prepare(dl)
-        self.dl = cycle(dl)
+        dl_A = self.accelerator.prepare(dl_A)
+        self.dl_A = cycle(dl_A)
+
+        self.ds_B = Dataset(
+            folder_B,
+            self.image_size,
+            augment_horizontal_flip = augment_horizontal_flip,
+            convert_image_to = convert_image_to
+        )
+        dl_B = DataLoader(self.ds_B,
+                        batch_size = train_batch_size,
+                        shuffle = True,
+                        pin_memory = True,
+                        num_workers = 1
+        # cpu_count()
+        )
+
+        dl_B = self.accelerator.prepare(dl_B)
+        self.dl_B = cycle(dl_B)
 
         # optimizer
 
@@ -921,7 +1031,8 @@ class Trainer(object):
 
         self.step = data['step']
         self.opt.load_state_dict(data['opt'])
-        self.ema.load_state_dict(data['ema'])
+        if self.accelerator.is_main_process:
+            return self.ema.load_state_dict(data['ema'])
 
         if 'version' in data:
             print(f"loading from version {data['version']}")
@@ -952,17 +1063,23 @@ class Trainer(object):
         accelerator = self.accelerator
         device = accelerator.device
 
-        with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
+        with tqdm(
+                initial = self.step,
+                total = self.train_num_steps,
+                disable = not accelerator.is_main_process) as pbar:
 
             while self.step < self.train_num_steps:
 
                 total_loss = 0.
 
                 for _ in range(self.gradient_accumulate_every):
-                    data = next(self.dl).to(device)
+
+                    data_A = next(self.dl_A).to(device)
+                    data_B = next(self.dl_B).to(device)
 
                     with self.accelerator.autocast():
-                        loss = self.model(data)
+                        loss = self.model(data_B, x_self_cond=data_A)
+
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss.item()
 
@@ -990,9 +1107,12 @@ class Trainer(object):
                             batches = num_to_groups(self.num_samples, self.batch_size)
                             all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
 
-                        all_images = torch.cat(all_images_list, dim = 0)
-
-                        utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))
+                        # all_images = torch.cat(all_images_list, dim = 0)
+                        for index, img in enumerate(all_images_list):
+                            imsave(
+                                self.results_folder / f'sample-{milestone}_{index}.tiff',
+                                img.astype(np.float32), imagej=True)
+                        # utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.tiff'), nrow = int(math.sqrt(self.num_samples)))
                         self.save(milestone)
 
                         # whether to calculate fid

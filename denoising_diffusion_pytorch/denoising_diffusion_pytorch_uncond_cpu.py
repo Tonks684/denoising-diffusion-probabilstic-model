@@ -900,9 +900,13 @@ class Trainer(object):
         split_batches = True,
         convert_image_to = None,
         calculate_fid = True,
-        inception_block_idx = 2048
+        inception_block_idx = 2048,
+        config=None
     ):
         super().__init__()
+
+        #wandb config and init
+        wandb.init(config=config)
 
         # accelerator
 
@@ -1070,13 +1074,15 @@ class Trainer(object):
                             milestone = self.step // self.save_and_sample_every
                             batches = num_to_groups(self.num_samples, self.batch_size)
                             # all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
-                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=1),[2]) )
+                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=self.batch_size),[2]) )
                         
                         # all_images = torch.cat(all_images_list, dim = 0)
-                        print(all_images_list[0][0])
-                        wandb.log({'Target': wandb.Image(data),})
-                        wandb.log({f'Sample_target': wandb.Image(all_images_list[0][0])},step=milestone)
-
+                        # Save Media
+                        wandb.log({'Target1': wandb.Image(data[0])})
+                        wandb.log({'Sample_target1': wandb.Image(all_images_list[0][0])})
+                        wandb.log({'Target2': wandb.Image(data[1])})
+                        wandb.log({'Sample_target2': wandb.Image(all_images_list[0][1])})
+                       
 
                         # utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))
                         # self.save(milestone)
