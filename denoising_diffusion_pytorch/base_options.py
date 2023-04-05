@@ -1,7 +1,7 @@
 import argparse
 import os
 import torch
-from util import mkdirs
+from util import *
 
 class BaseOptions():
     def __init__(self):
