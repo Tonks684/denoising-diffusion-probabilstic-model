@@ -52,6 +52,7 @@ from pytorch_fid.fid_score import calculate_frechet_distance
 from version import __version__
 import wandb
 wandb.init()
+import matplotlib.pyplot as plt
 
 # constants
 
@@ -102,20 +103,45 @@ def convert_image_to_fn(img_type, image):
 # def normalize_16bit_image_to_zero_to_one(img):
 #     return img.point(lambda p: p*(1/65535.0))
 
-def unnormalize_tensor_to_img(
-        image_tensor, imtype=np.uint16,normalise=True,
-        stack_predictions=False):
-    if len(image_tensor.size()) == 4:
+def unnormalize_tensor_to_img(image_tensor, imtype=np.uint16,normalise=True, stack_predictions=False):
+    # print(image_tensor)
+    if isinstance(image_tensor, list):
         image_numpy = []
         for i in range(len(image_tensor)):
             image_numpy.append(
-                unnormalize_tensor_to_img(image_tensor[i,:,:,:])
+                unnormalize_tensor_to_img(image_tensor[i])
+            )
+        return image_numpy
+    
+    if len(image_tensor.size()) == 5:
+        # bs, T, channel, width,height
+        # 128,1000,1,256,256
+        
+        for batch in range(image_tensor.size()[0]):
+            image_numpy = []
+            for t in range(image_tensor.size()[1]):
+                image_numpy.append(
+                unnormalize_tensor_to_img(image_tensor[batch,t,:,:,:])
             )
         return image_numpy
 
+    if len(image_tensor.size()) == 4:
+        # bs,channel, width,height
+        # 128,1,256,256
+        
+        for batch in range(image_tensor.size()[0]):
+            image_numpy = []
+            for t in range(image_tensor.size()[1]):
+                image_numpy.append(
+                unnormalize_tensor_to_img(image_tensor[batch,:,:,:])
+            )
+        return image_numpy
+
+
     image_numpy = image_tensor.cpu().float().numpy()
-    if normalise:
-        image_numpy = np.transpose(image_numpy, (1, 2, 0)) * 65535.0
+    # if normalise:
+        # print(f'pre tranpose shape: {image_numpy.shape}')
+    image_numpy = np.transpose(image_numpy, (1, 2, 0)) * 65535.0
     # if image_numpy.shape[2] == 1 or image_numpy.shape[2] > 3:
     #     image_numpy = image_numpy[:, :, 0]
     return image_numpy.astype(imtype)
@@ -437,11 +463,9 @@ class Unet(nn.Module):
 
     def forward(self, x, time, cond_A = None):
         if self.self_condition:
-            # condition on cond_A but x shape is bs, ch,x,y so cond_A needs to be of shape bs,w,h
-            print(x.shape)
-            x_self_cond = default(cond_A, lambda: torch.zeros_like(x))
-            print(x_self_cond.shape)
-            x = torch.cat([x_self_cond, x], dim = 1)
+            cond_A = default(cond_A, lambda: torch.zeros_like(x))
+            # print(f'x {x.size()} cond_A {cond_A.size()}')
+            x = torch.cat([x, cond_A], dim = 1)
 
         x = self.init_conv(x)
         r = x.clone()
@@ -672,9 +696,8 @@ class GaussianDiffusion(nn.Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def model_predictions(self, x, t, cat_A_xstart = None, clip_x_start = False, rederive_pred_noise = False):
-
-        model_output = self.model(x, t, cat_A_xstart)
+    def model_predictions(self, x, t, cond_A = None, clip_x_start = False, rederive_pred_noise = False):
+        model_output = self.model(x, t, cond_A)
         # maybe_clip = partial(torch.clamp, min = -1., max = 1.) if clip_x_start else identity
 
         if self.objective == 'pred_noise':
@@ -698,8 +721,8 @@ class GaussianDiffusion(nn.Module):
 
         return ModelPrediction(pred_noise, x_start)
 
-    def p_mean_variance(self, x, t, cat_A_xstart = None, clip_denoised = False):
-        preds = self.model_predictions(x, t, cat_A_xstart)
+    def p_mean_variance(self, x, t, cond_A = None, clip_denoised = False):
+        preds = self.model_predictions(x, t, cond_A=cond_A)
         x_start = preds.pred_x_start
 
         if clip_denoised:
@@ -709,10 +732,10 @@ class GaussianDiffusion(nn.Module):
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
     @torch.no_grad()
-    def p_sample(self, x, t: int, cat_A_xstart = None):
+    def p_sample(self, x, t: int, cond_A = None):
         b, *_, device = *x.shape, x.device
         batched_times = torch.full((b,), t, device = x.device, dtype = torch.long)
-        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, cat_A_xstart = cat_A_xstart, clip_denoised = True)
+        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, cond_A = cond_A, clip_denoised = False)
         noise = torch.randn_like(x) if t > 0 else 0. # no noise if t == 0
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
         return pred_img, x_start
@@ -721,34 +744,36 @@ class GaussianDiffusion(nn.Module):
     def p_sample_loop(self, shape, return_all_timesteps = False, cond_A=None):
         """
         Full sampling back from T to 1
-        cond_A = Conditional input that is concatenated with x_start (Gaussian Noise)
+        cond_A = Conditional input that is concatenated with x_start (Gaussian Noise at T and then reduced noise as t goes to)
         """
-
         batch, device = shape[0], self.betas.device
 
         img = torch.randn(shape, device = device)
         imgs = [img]
 
-        x_start = None
+        
+        x_start = img # Complete Noise
 
         for t in tqdm(reversed(range(0, self.num_timesteps)), 
         desc = 'sampling loop time step', total = self.num_timesteps):
+        # for t in reversed(range(1,1000)):
             # x_start at 0 is Total Total Noise
             # what we need is total noise conditioned on BF
             # self_cond = x_start if self.self_condition else None
-            cat_A_xstart = torch.cat(cond_A,x_start,dim=1)
-            img, x_start = self.p_sample(img, t, cat_A_xstart)
-            imgs.append(img)
-
+            # cat_A_xstart = torch.cat(cond_A,x_start,dim=1)
+            # print(t)
+            img_tminus1, x_start = self.p_sample(img, t, cond_A)
+            imgs.append(img_tminus1)
+        print(f'sampling loops {len(imgs)}')
         ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
         
         # ret_0to1 = self.unnormalize(ret)
-        ret_16bit = self.tensor2img(ret_0to1)
+        ret_16bit = self.tensor2img(ret)
 
         return ret_16bit
 
     @torch.no_grad()
-    def ddim_sample(self, shape,return_all_timesteps = False):
+    def ddim_sample(self, shape,return_all_timesteps = False,cond_A=None):
 
         """
         Skipping some sampling steps faster computation (intuition)
@@ -756,18 +781,18 @@ class GaussianDiffusion(nn.Module):
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.betas.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
 
         times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
-        times = list(reversed(times.int().tolist()))
+        times = list(reversed(times.int().tolist())) # [T-1, T-2,... -1]
         time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
-
+        # Complete noise
         img = torch.randn(shape, device = device)
         imgs = [img]
 
         x_start = None
 
         for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
-            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
-            self_cond = x_start if self.self_condition else None
-            pred_noise, x_start, *_ = self.model_predictions(img, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+            time_cond = torch.full((batch,), time, device = device, dtype = torch.long) #create tensor of size (bactch,) and fill in with time so if T is 1000 T-1 999 torch.long enforces int64
+            self_cond = x_start if self.self_condition else None # if self_condition x_start = None for first iter
+            pred_noise, x_start, *_ = self.model_predictions(img, time_cond, cond_A=cond_A, clip_x_start = True, rederive_pred_noise = True)
 
             if time_next < 0:
                 img = x_start
@@ -798,7 +823,8 @@ class GaussianDiffusion(nn.Module):
     def sample(self, batch_size = 16, return_all_timesteps = False, cond_A=None):
         image_size, channels = self.image_size, self.channels
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
-        return sample_fn((batch_size, channels, image_size, image_size), return_all_timesteps = return_all_timesteps,)
+        # sample_fn = self.ddim_sample
+        return sample_fn((batch_size, channels, image_size, image_size),cond_A=cond_A, return_all_timesteps = return_all_timesteps)
 
     @torch.no_grad()
     def interpolate(self, x1, x2, t = None, lam = 0.5):
@@ -912,7 +938,7 @@ class Dataset(Dataset):
             # T.Lambda(maybe_convert_fn), # Identidy only as convert_image_to = None
             # T.Resize(image_size),
             # T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
-            T.RandomCrop(size=(image_size,image_size)),
+            T.CenterCrop(size=(image_size,image_size)),
             T.ToTensor(),
             T.Normalize((0.5,), (0.5,))
         ])
@@ -944,8 +970,8 @@ class Trainer(object):
         ema_update_every = 10,
         ema_decay = 0.995,
         adam_betas = (0.9, 0.99),
-        save_and_sample_every = 1,
-        num_samples = 25,
+        save_and_sample_every = 100,
+        num_samples = 5,
         results_folder = None,
         amp = True,
         fp16 = True,
@@ -985,7 +1011,7 @@ class Trainer(object):
 
         # sampling and training hyperparameters
 
-        assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
+        # assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
         self.num_samples = num_samples
         self.save_and_sample_every = save_and_sample_every
 
@@ -1161,25 +1187,26 @@ class Trainer(object):
                         with torch.no_grad():
                             milestone = self.step // self.save_and_sample_every
                             batches = num_to_groups(self.num_samples, self.batch_size)
-                            # all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=1), batches))
-                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=self.batch_size,cond_A=data_A),[2]))
+                            # all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=1,[2]))
+                            sample = self.ema.ema_model.sample(batch_size=self.batch_size,cond_A=data_A)
+                            # sample = self.model.sample(batch_size=self.batch_size,cond_A=data_A)
+                       
+                        ## Save locally
+
                         # for item in all_images_list:
                         #     for i in item:
                         #         print(f'list item {np.asarray(i).shape} item dtype {i.dtype}')
                         # all_images = torch.cat(all_images_list, dim = 0)
-                        # imsave(self.results_folder / f'sample-{milestone}.tiff', all_images_list[0][0][1].astype(np.float32), imagej=True)
-            
-                        # self.save(milestone)
-                        # print(all_images_list[0][0])
-                        print(all_images_list[0][0].shape)
-                        # Save Media
-                        wandb.log({'Input1': wandb.Image(data_A[0])})
+                        # for index,img in enumerate(sample):
+                            # imsave(self.results_folder, f'/stacks/sample_stack_index_{index}.tiff', img.astype(np.float32), imagej=True)
+                        
+                        
+                        # Save W&B
+                        wandb.log({'Input': wandb.Image(data_A[0])})
                         wandb.log({'Target1': wandb.Image(data_B[0])})
-                        wandb.log({'Sample_target1': wandb.Image(all_images_list[0][0])})
-                        wandb.log({'Input2': wandb.Image(data_A[1])})
-                        wandb.log({'Target2': wandb.Image(data_B[1])})
-                        wandb.log({'Sample_target2': wandb.Image(all_images_list[0][1])})
-                        # Save config
+                        wandb.log({'Sample_target1': wandb.Image(plt.imshow(sample[0],cmap='gray'))})
+                        wandb.log({'Sample Histogram': wandb.Histogram(sample[0])})
+                        # # Save config
                         # data = {
                         #     'step': self.step,
                         #     'model': self.accelerator.get_state_dict(self.model),
@@ -1189,7 +1216,7 @@ class Trainer(object):
                         #         }
                         # wandb.config.update(data)
                         # whether to calculate fid
-
+    
                         if exists(self.inception_v3):
                             fid_score = self.fid_score(real_samples = data_B, fake_samples = all_images)
                             accelerator.print(f'fid_score: {fid_score}')
