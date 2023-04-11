@@ -1,23 +1,3 @@
-"""
-Changes
-
-Added functions
-
-# Normalise from 16bit to 0 to 1 and inverse
-normalize_16bit_image_to_zero_to_one
-unnormalize_tensor_to_img
-
-# Loss calculation
-# Unet function (needs to have to channels (concat of noise))
-self.self_condition is set to True, the forward call is then adjusted
-
-def forward(self, x, time, cond_A = None):
-        if self.self_condition:
-            x_self_cond = default(cond_A, lambda: torch.zeros_like(x))
-     
-where cond_A is the bright-field A from the training loop
-
-"""
 
 import math
 import copy
@@ -42,7 +22,7 @@ from einops.layers.torch import Rearrange
 
 from PIL import Image
 from tqdm.auto import tqdm
-from ema_pytorch import EMA #Exponential moving average
+from ema_pytorch import EMA 
 
 from accelerate import Accelerator
 
@@ -53,98 +33,11 @@ from version import __version__
 import wandb
 wandb.init()
 import matplotlib.pyplot as plt
+from utils import *
 
 # constants
 
 ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
-
-# helpers functions
-
-def exists(x):
-    return x is not None
-
-def default(val, d):
-    if exists(val):
-        return val
-    return d() if callable(d) else d
-
-def identity(t, *args, **kwargs):
-    return t
-
-def cycle(dl):
-    while True:
-        for data in dl:
-            yield data
-
-def has_int_squareroot(num):
-    return (math.sqrt(num) ** 2) == num
-
-def num_to_groups(num, divisor):
-    groups = num // divisor
-    remainder = num % divisor
-    arr = [divisor] * groups
-    if remainder > 0:
-        arr.append(remainder)
-    return arr
-
-def convert_image_to_fn(img_type, image):
-    if image.mode != img_type:
-        return image.convert(img_type)
-    return image
-
-# normalization functions
-
-# def normalize_to_neg_one_to_one(img):
-#     return img * 2 - 1
-
-# def unnormalize_to_zero_to_one(t):
-#     return (t + 1) * 0.5
-
-# def normalize_16bit_image_to_zero_to_one(img):
-#     return img.point(lambda p: p*(1/65535.0))
-
-def unnormalize_tensor_to_img(image_tensor, imtype=np.uint16,normalise=True, stack_predictions=False):
-    # print(image_tensor)
-    if isinstance(image_tensor, list):
-        image_numpy = []
-        for i in range(len(image_tensor)):
-            image_numpy.append(
-                unnormalize_tensor_to_img(image_tensor[i])
-            )
-        return image_numpy
-    
-    if len(image_tensor.size()) == 5:
-        # bs, T, channel, width,height
-        # 128,1000,1,256,256
-        
-        for batch in range(image_tensor.size()[0]):
-            image_numpy = []
-            for t in range(image_tensor.size()[1]):
-                image_numpy.append(
-                unnormalize_tensor_to_img(image_tensor[batch,t,:,:,:])
-            )
-        return image_numpy
-
-    if len(image_tensor.size()) == 4:
-        # bs,channel, width,height
-        # 128,1,256,256
-        
-        for batch in range(image_tensor.size()[0]):
-            image_numpy = []
-            for t in range(image_tensor.size()[1]):
-                image_numpy.append(
-                unnormalize_tensor_to_img(image_tensor[batch,:,:,:])
-            )
-        return image_numpy
-
-
-    image_numpy = image_tensor.cpu().float().numpy()
-    # if normalise:
-        # print(f'pre tranpose shape: {image_numpy.shape}')
-    image_numpy = np.transpose(image_numpy, (1, 2, 0)) * 65535.0
-    # if image_numpy.shape[2] == 1 or image_numpy.shape[2] > 3:
-    #     image_numpy = image_numpy[:, :, 0]
-    return image_numpy.astype(imtype)
 
 
 # small helper modules
@@ -376,46 +269,37 @@ class Attention(nn.Module):
 class Unet(nn.Module):
     def __init__(
         self,
-        dim,
-        init_dim = None,
-        out_dim = None,
-        dim_mults=(1, 2, 4, 8),
-        channels = 1,
-        self_condition = True, # Condition on BF
-        resnet_block_groups = 8,
-        learned_variance = False,
-        learned_sinusoidal_cond = False,
-        random_fourier_features = False,
-        learned_sinusoidal_dim = 16
-    ):
+        opt):
+
         super().__init__()
 
         # determine dimensions
 
-        self.channels = channels
-        self.self_condition = self_condition
-        input_channels = channels * (2 if self_condition else 1)
-
-        init_dim = default(init_dim, dim)
+        self.channels = opt.channels
+        self.self_condition = opt.self_condition
+        input_channels = opt.channels * (2 if opt.self_condition else 1)
+        init_dim = default(None, opt.init_dim)
+        
         self.init_conv = nn.Conv2d(input_channels, init_dim, 7, padding = 3)
 
-        dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
+        dims = [init_dim, *map(lambda m: opt.init_dim * m, opt.dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
+        print(f'OUtput channels are {in_out}')
 
-        block_klass = partial(ResnetBlock, groups = resnet_block_groups)
+        block_klass = partial(ResnetBlock, groups = opt.resnet_block_groups)
 
         # time embeddings
 
-        time_dim = dim * 4
+        time_dim = opt.init_dim * 4
 
-        self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
+        self.random_or_learned_sinusoidal_cond = opt.learned_sinusoidal_cond or opt.random_fourier_features
 
         if self.random_or_learned_sinusoidal_cond:
-            sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(learned_sinusoidal_dim, random_fourier_features)
-            fourier_dim = learned_sinusoidal_dim + 1
+            sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(opt.learned_sinusoidal_dim, opt.random_fourier_features)
+            fourier_dim = opt.learned_sinusoidal_dim + 1
         else:
-            sinu_pos_emb = SinusoidalPosEmb(dim)
-            fourier_dim = dim
+            sinu_pos_emb = SinusoidalPosEmb(opt.init_dim)
+            fourier_dim = opt.init_dim
 
         self.time_mlp = nn.Sequential(
             sinu_pos_emb,
@@ -455,16 +339,15 @@ class Unet(nn.Module):
                 Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
             ]))
 
-        default_out_dim = channels * (1 if not learned_variance else 2)
-        self.out_dim = default(out_dim, default_out_dim)
+        default_out_dim = opt.channels * (1 if not opt.learned_variance else 2)
+        self.out_dim = default_out_dim
 
-        self.final_res_block = block_klass(dim * 2, dim, time_emb_dim = time_dim)
-        self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
+        self.final_res_block = block_klass(opt.init_dim * 2, opt.init_dim, time_emb_dim = time_dim)
+        self.final_conv = nn.Conv2d(opt.init_dim, self.out_dim, 1)
 
     def forward(self, x, time, cond_A = None):
         if self.self_condition:
             cond_A = default(cond_A, lambda: torch.zeros_like(x))
-            # print(f'x {x.size()} cond_A {cond_A.size()}')
             x = torch.cat([x, cond_A], dim = 1)
 
         x = self.init_conv(x)
@@ -552,20 +435,7 @@ class GaussianDiffusion(nn.Module):
     def __init__(
         self,
         model,
-        *,
-        image_size,
-        timesteps = 1000,
-        sampling_timesteps = None,
-        loss_type = 'l1',
-        objective = 'pred_noise',
-        beta_schedule = 'sigmoid',
-        schedule_fn_kwargs = dict(),
-        p2_loss_weight_gamma = 0., # p2 loss weight, from https://arxiv.org/abs/2204.00227 - 0 is equivalent to weight of 1 across time - 1. is recommended
-        p2_loss_weight_k = 1,
-        ddim_sampling_eta = 0.,
-        auto_normalize = False,
-        x_self_cond = None,
-        original_image_size=1080,
+        opt,
     ):
         super().__init__()
         assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
@@ -576,30 +446,30 @@ class GaussianDiffusion(nn.Module):
         # Binary variable for self conditioning
         self.self_condition = self.model.self_condition
 
-        self.image_size = image_size
+        self.image_size = opt.image_size
 
-        self.objective = objective
-        self.original_image_size = original_image_size
-        assert objective in {'pred_noise', 'pred_x0', 'pred_v'}, \
+        self.objective = opt.objective
+        self.original_image_size = opt.original_image_size
+        assert opt.objective in {'pred_noise', 'pred_x0', 'pred_v'}, \
             'objective must be either pred_noise (predict noise) or pred_x0 ' \
             '(predict image start) or pred_v (predict v [v-parameterization ' \
             'as defined in appendix D of progressive distillation paper, ' \
             'used in imagen-video successfully])'
 
-        if beta_schedule == 'linear':
+        if opt.beta_schedule == 'linear':
             beta_schedule_fn = linear_beta_schedule
-        elif beta_schedule == 'cosine':
+        elif opt.beta_schedule == 'cosine':
             beta_schedule_fn = cosine_beta_schedule
-        elif beta_schedule == 'sigmoid':
+        elif opt.beta_schedule == 'sigmoid':
             beta_schedule_fn = sigmoid_beta_schedule
         else:
-            raise ValueError(f'unknown beta schedule {beta_schedule}')
+            raise ValueError(f'unknown beta schedule {opt.beta_schedule}')
 
         # DDPM formulas
         # q(xt|xt-1)= N(xt; sqrt(alpha_t)*xt-1,Beta_t*I)
         # q(x1:T|x0)= cum_dot_product_1toT(q(xt|xt-1))
 
-        betas = beta_schedule_fn(timesteps, **schedule_fn_kwargs)
+        betas = beta_schedule_fn(opt.timesteps, **opt.schedule_fn_kwargs)
         # Beta from 1 to T (change in variance schedule based on no. timesteps)
         alphas = 1. - betas
         # .cumprod returns array at_1, at_1*at_2, at_1*at_2*at_3,...at_n! of all alphas
@@ -609,18 +479,18 @@ class GaussianDiffusion(nn.Module):
         alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)
 
         timesteps, = betas.shape
-        self.num_timesteps = int(timesteps)
-        self.loss_type = loss_type
+        self.num_timesteps = int(opt.timesteps)
+        self.loss_type = opt.loss_type
 
         # sampling related parameters
 
-        self.sampling_timesteps = default(sampling_timesteps, timesteps) # default num sampling timesteps to number of timesteps at training
+        self.sampling_timesteps = default(opt.sampling_timesteps, opt.timesteps) # default num sampling timesteps to number of timesteps at training
         # 1000 timesteps
         # self.sampling_timesteps are inference timesteps
-        assert self.sampling_timesteps <= timesteps
+        assert self.sampling_timesteps <= opt.timesteps
         # If sampling timesteps are smaller than timesteps (1000) then is ddim sampling else not
-        self.is_ddim_sampling = self.sampling_timesteps < timesteps
-        self.ddim_sampling_eta = ddim_sampling_eta
+        self.is_ddim_sampling = self.sampling_timesteps < opt.timesteps
+        self.ddim_sampling_eta = opt.ddim_sampling_eta
 
         # helper function to register buffer from float64 to float32
 
@@ -655,12 +525,12 @@ class GaussianDiffusion(nn.Module):
 
         # calculate p2 reweighting
 
-        register_buffer('p2_loss_weight', (p2_loss_weight_k + alphas_cumprod / (1 - alphas_cumprod)) ** -p2_loss_weight_gamma)
+        register_buffer('p2_loss_weight', (opt.p2_loss_weight_k + alphas_cumprod / (1 - alphas_cumprod)) ** -opt.p2_loss_weight_gamma)
 
         # auto-normalization of data [0, 1] -> [-1, 1] - can turn off by setting it to be False
         
-        self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity
-        self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity
+        self.normalize = normalize_to_neg_one_to_one if opt.auto_normalize else identity
+        self.unnormalize = unnormalize_to_zero_to_one if opt.auto_normalize else identity
         self.tensor2img = unnormalize_tensor_to_img 
 
     def predict_start_from_noise(self, x_t, t, noise):
@@ -918,27 +788,28 @@ class GaussianDiffusion(nn.Module):
 class Dataset(Dataset):
     def __init__(
         self,
-        folder,
-        image_size,
-        exts = ['jpg', 'jpeg', 'png', 'tiff'],
-        augment_horizontal_flip = False,
-        convert_image_to = None,
-        original_image_size=1080
+        opt,
+        channel=None
     ):
         super().__init__()
-        self.folder = folder
-        self.image_size = image_size
-        self.original_image_size = original_image_size
-        self.paths = [p for ext in exts for p in
-                        Path(f'{folder}').glob(f'*.{ext}')]
-
+        if channel == "A":
+            self.folder = opt.folder_A
+            self.paths = [p for ext in opt.exts for p in
+                        Path(f'{opt.folder_A}').glob(f'*.{ext}')]
+        else:
+            self.folder = opt.folder_B
+            self.paths = [p for ext in opt.exts for p in
+                        Path(f'{opt.folder_B}').glob(f'*.{ext}')]
+        self.image_size = opt.image_size
+        self.original_image_size = opt.original_image_size
+        
         self.transform = T.Compose([
             # Crop image
             # T.Lambda(lambda img: __crop(img, params['crop_pos'],self.image_size)),
             # T.Lambda(maybe_convert_fn), # Identidy only as convert_image_to = None
             # T.Resize(image_size),
             # T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
-            T.CenterCrop(size=(image_size,image_size)),
+            T.CenterCrop(size=(self.image_size,self.image_size)),
             T.ToTensor(),
             T.Normalize((0.5,), (0.5,))
         ])
@@ -959,41 +830,21 @@ class Trainer(object):
     def __init__(
         self,
         diffusion_model,
-        folder_A,
-        folder_B,
-        *,
-        train_batch_size = 16,
-        gradient_accumulate_every = 1,
-        augment_horizontal_flip = True,
-        train_lr = 1e-4,
-        train_num_steps = 100000,
-        ema_update_every = 10,
-        ema_decay = 0.995,
-        adam_betas = (0.9, 0.99),
-        save_and_sample_every = 100,
-        num_samples = 5,
-        results_folder = None,
-        amp = True,
-        fp16 = True,
-        split_batches = True,
-        convert_image_to = None,
-        calculate_fid = True,
-        inception_block_idx = 2048,
-        config=None
+        opt
     ):
         super().__init__()
 
         #wandb config and init
-        wandb.init(config=config)
+        wandb.init()
 
         # accelerator
 
         self.accelerator = Accelerator(
-            split_batches = split_batches,
-            mixed_precision = 'fp16' if fp16 else 'no',
+            split_batches = opt.split_batches,
+            mixed_precision = 'fp16' if opt.fp16 else 'no',
         )
 
-        self.accelerator.native_amp = amp
+        self.accelerator.native_amp = opt.amp
 
         # model
 
@@ -1003,75 +854,57 @@ class Trainer(object):
 
         self.inception_v3 = None
 
-        if calculate_fid:
-            assert inception_block_idx in InceptionV3.BLOCK_INDEX_BY_DIM
-            block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[inception_block_idx]
+        if opt.calculate_fid:
+            assert opt.inception_block_idx in InceptionV3.BLOCK_INDEX_BY_DIM
+            block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[opt.inception_block_idx]
             self.inception_v3 = InceptionV3([block_idx])
             self.inception_v3.to(self.device)
 
         # sampling and training hyperparameters
 
         # assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
-        self.num_samples = num_samples
-        self.save_and_sample_every = save_and_sample_every
+        self.num_samples = opt.num_samples
+        self.save_and_sample_every = opt.save_and_sample_every
 
-        self.batch_size = train_batch_size
-        self.gradient_accumulate_every = gradient_accumulate_every
+        self.batch_size = opt.train_batch_size
+        self.gradient_accumulate_every = opt.gradient_accumulate_every
 
-        self.train_num_steps = train_num_steps
+        self.train_num_steps = opt.train_num_steps
         self.image_size = diffusion_model.image_size
         self.original_image_size = diffusion_model.original_image_size
         # dataset and dataloader
 
-        self.ds_A = Dataset(
-            folder_A,
-            self.image_size,
-            augment_horizontal_flip = augment_horizontal_flip,
-            convert_image_to = convert_image_to,
-            original_image_size=self.original_image_size
-        )
-        self.ds_B = Dataset(
-            folder_B,
-            self.image_size,
-            augment_horizontal_flip = augment_horizontal_flip,
-            convert_image_to = convert_image_to
-        )
+        self.ds_A = Dataset(opt,channel="A")
         dl_A = DataLoader(self.ds_A,
-                        batch_size = train_batch_size,
-                        shuffle = False, #matching
+                        batch_size = opt.train_batch_size,
+                        shuffle = opt.shuffle, 
                         pin_memory = True,
-                        num_workers = 0)
+                        num_workers = opt.num_workers)
 
         dl_A = self.accelerator.prepare(dl_A)
         self.dl_A = cycle(dl_A)
 
-        self.ds_B = Dataset(
-            folder_B,
-            self.image_size,
-            augment_horizontal_flip = augment_horizontal_flip,
-            convert_image_to = convert_image_to,
-            original_image_size=self.original_image_size
-        )
+        self.ds_B = Dataset(opt,channel="B")
         dl_B = DataLoader(self.ds_B,
-                        batch_size = train_batch_size,
-                        shuffle = False,
+                        batch_size = opt.train_batch_size,
+                        shuffle = opt.shuffle,
                         pin_memory = True,
-                        num_workers = 0)
+                        num_workers = opt.num_workers)
         
 
         dl_B = self.accelerator.prepare(dl_B)
         self.dl_B = cycle(dl_B)
         # optimizer
 
-        self.opt = Adam(diffusion_model.parameters(), lr = train_lr, betas = adam_betas)
+        self.opt = Adam(diffusion_model.parameters(), lr = opt.train_lr, betas = opt.adam_betas)
 
         # for logging results in a folder periodically
 
         if self.accelerator.is_main_process:
-            self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
+            self.ema = EMA(diffusion_model, beta = opt.ema_decay, update_every = opt.ema_update_every)
             self.ema.to(self.device)
 
-        self.results_folder = Path(results_folder)
+        self.results_folder = Path(opt.results_folder)
         self.results_folder.mkdir(exist_ok = True)
 
         # step counter state
@@ -1098,8 +931,6 @@ class Trainer(object):
             'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
             'version': __version__
         }
-        wandb.config(data)
-
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
 
     def load(self, milestone):
@@ -1192,7 +1023,6 @@ class Trainer(object):
                             # sample = self.model.sample(batch_size=self.batch_size,cond_A=data_A)
                        
                         ## Save locally
-
                         # for item in all_images_list:
                         #     for i in item:
                         #         print(f'list item {np.asarray(i).shape} item dtype {i.dtype}')
@@ -1206,17 +1036,8 @@ class Trainer(object):
                         wandb.log({'Target1': wandb.Image(data_B[0])})
                         wandb.log({'Sample_target1': wandb.Image(plt.imshow(sample[0],cmap='gray'))})
                         wandb.log({'Sample Histogram': wandb.Histogram(sample[0])})
-                        # # Save config
-                        # data = {
-                        #     'step': self.step,
-                        #     'model': self.accelerator.get_state_dict(self.model),
-                        #     'opt': self.opt.state_dict(),
-                        #     'ema': self.ema.state_dict(),
-                        #     'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
-                        #         }
-                        # wandb.config.update(data)
+                        
                         # whether to calculate fid
-    
                         if exists(self.inception_v3):
                             fid_score = self.fid_score(real_samples = data_B, fake_samples = all_images)
                             accelerator.print(f'fid_score: {fid_score}')
