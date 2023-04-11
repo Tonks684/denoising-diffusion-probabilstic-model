@@ -2,8 +2,6 @@ import os
 import numpy as np
 import torch
 import math 
-import args
-
 
 def mkdir(path):
     """create a single empty directory if it didn't exist
@@ -111,3 +109,12 @@ def unnormalize_tensor_to_img(image_tensor, imtype=np.uint16,normalise=True, sta
     # if image_numpy.shape[2] == 1 or image_numpy.shape[2] > 3:
     #     image_numpy = image_numpy[:, :, 0]
     return image_numpy.astype(imtype)
+
+def print_params(net):
+    if isinstance(net,list):
+        net = net[0]
+    num_params = 0
+    for params in net.parameters():
+        num_params += params.numel()
+    print(f'Total Number of params {num_params}')
+    return num_params

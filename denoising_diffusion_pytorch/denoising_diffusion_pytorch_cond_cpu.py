@@ -31,7 +31,7 @@ from pytorch_fid.fid_score import calculate_frechet_distance
 
 from version import __version__
 import wandb
-wandb.init()
+# wandb.init()
 import matplotlib.pyplot as plt
 from utils import *
 
@@ -809,7 +809,7 @@ class Dataset(Dataset):
             # T.Lambda(maybe_convert_fn), # Identidy only as convert_image_to = None
             # T.Resize(image_size),
             # T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
-            T.CenterCrop(size=(self.image_size,self.image_size)),
+            # T.CenterCrop(size=(self.image_size,self.image_size)),
             T.ToTensor(),
             T.Normalize((0.5,), (0.5,))
         ])
