@@ -47,7 +47,7 @@ class BaseOptions():
         self.parser.add_argument('--num_workers', type=int,default=0, help='if running on local cpu 0 if HPC gpu go with 4')
         self.parser.add_argument('--exts', type=list,default=['jpg', 'jpeg', 'png', 'tiff'], help='image extensions')
         #Training
-        self.parser.add_argument('--train_batch_size',type=int,default=8, help='batch size')
+        self.parser.add_argument('--train_batch_size',type=int,default=4, help='batch size')
         self.parser.add_argument('--gradient_accumulate_every',type=int,default=1)
         self.parser.add_argument('--train_lr',default=8e-5, help='learning rate')
         self.parser.add_argument('--train_num_steps',type=int,default=100000, help='number of steps')

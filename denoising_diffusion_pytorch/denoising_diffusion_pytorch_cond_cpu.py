@@ -891,7 +891,9 @@ class Trainer(object):
                         pin_memory = True,
                         num_workers = opt.num_workers)
         
-
+        dataset_size = {'training_set_size':len(dl_B)}
+        wandb.config.update(dataset_size)
+        
         dl_B = self.accelerator.prepare(dl_B)
         self.dl_B = cycle(dl_B)
         # optimizer
