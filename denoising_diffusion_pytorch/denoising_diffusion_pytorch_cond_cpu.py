@@ -977,7 +977,7 @@ class Trainer(object):
     def train(self):
         accelerator = self.accelerator
         device = accelerator.device
-
+        # training_starts = time.time()
         with tqdm(
                 initial = self.step,
                 total = self.train_num_steps,
@@ -995,6 +995,7 @@ class Trainer(object):
                     with self.accelerator.autocast():
                         loss = self.model(data_B, cond_A=data_A)
                         wandb.log({'loss':loss.item()})
+                        # loss_compute
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss.item()
 
