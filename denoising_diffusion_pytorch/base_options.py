@@ -28,7 +28,7 @@ class BaseOptions():
         self.parser.add_argument('--learned_sinusoidal_dim', type=int, default=16)
         #Diffusion
         self.parser.add_argument('--image_size',type=int,default=64, help='size you want to train on (if smaller than original image_size a crop will be taken)')
-        self.parser.add_argument('--sampling_timesteps',type=int,default=10)
+        self.parser.add_argument('--sampling_timesteps',type=int,default=250)
         self.parser.add_argument('--original_image_size',type=int,default=64, help='size of input image')
         self.parser.add_argument('--timesteps',type=int,default=1000, help='number of diffusion steps')
         self.parser.add_argument('--loss_type',type=str,default='l1', help='loss type either l1 or l2')
@@ -54,7 +54,7 @@ class BaseOptions():
         self.parser.add_argument('--ema_update_every',type=int,default=10, help='exponential moving average log update schedule')
         self.parser.add_argument('--adam_betas',type=tuple,default=(0.9,0.99), help='Adam Beta values')
         self.parser.add_argument('--ema_decay',type=int,default=0.995, help='exponential moving average decay')
-        self.parser.add_argument('--save_and_sample_every',type=int,default=1, help='number of steps after to save milestone and sample')
+        self.parser.add_argument('--save_and_sample_every',type=int,default=5000, help='number of steps after to save milestone and sample')
         self.parser.add_argument('--num_samples',type=int,default=1, help='number of samples per sample')
         self.parser.add_argument('--amp', type=bool,default=False, help='AMP Prcesion')
         self.parser.add_argument('--fp16', type=bool,default=False, help='Floating point 16')

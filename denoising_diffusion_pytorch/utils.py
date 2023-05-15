@@ -79,7 +79,6 @@ def unnormalize_tensor_to_img(image_tensor, imtype=np.uint16,normalise=True, sta
         # bs, T, channel, width,height
         # 128,1000,1,256,256 
         final_images = []  
-        print(f'Within function Tensor Sixe: {image_tensor.size()}')
         for batch in range(image_tensor.size()[0]):
             for t in range(image_tensor.size()[1]):
                 image_numpy =  image_tensor[batch,t,:,:]
@@ -106,8 +105,8 @@ def unnormalize_tensor_to_img(image_tensor, imtype=np.uint16,normalise=True, sta
     #         )
     
     if len(image_tensor.size()) == 3:
-        # bs,channel, width,height
-        # 128,1,256,256 
+        # channel, width,height
+        # 1,256,256 
         final_images = []  
         image_numpy =  image_tensor
         image_numpy = image_numpy.cpu().float().numpy()
@@ -142,8 +141,15 @@ def diffusion_proccess(time_steps,noisey_samples):
     noisey_sample_per_img = [
         list(noisey_samples[i:i+len(time_steps)]) 
         for i in range(0,len(noisey_samples),len(time_steps))]
-    
-    fig, ax = plt.subplots(len(noisey_sample_per_img),len(time_steps),figsize=(10,5))    # Extract diffusion between batch elements
+    # Extract subset of timesteps
+    if len(noisey_sample_per_img) <= 10:
+        continue
+    else:
+        subset_timesteps = len(noisey_sample_per_img // 25
+        noisey_sample_per_img = [ noisey_sample_per_img[i+subset_timesteps] 
+        for i in range(0,noisey_sample_per_img,subset_timesteps)]
+        
+    fig, ax = plt.subplots(len(noisey_sample_per_img),len(noisey_sample_per_img[0]),figsize=(10,5))    # Extract diffusion between batch elements
     for row,j in enumerate(noisey_sample_per_img):
         for col, (time_step, img) in enumerate(zip(time_steps,j)):
             ax[row,col].imshow(img,cmap='gray')
