@@ -2,7 +2,9 @@ import os
 import numpy as np
 import torch
 import math 
-
+from torchvision.utils import make_grid
+import matplotlib.pyplot as plt
+from einops import rearrange
 def mkdir(path):
     """create a single empty directory if it didn't exist
     Parameters:
@@ -68,47 +70,52 @@ def normalize_16bit_image_to_zero_to_one(img):
     return img.point(lambda p: p*(1/65535.0))
 
 def unnormalize_tensor_to_img(image_tensor, imtype=np.uint16,normalise=True, stack_predictions=False):
-    # print(image_tensor)
-    if isinstance(image_tensor, list):
-        image_numpy = []
-        for i in range(len(image_tensor)):
-            image_numpy.append(
-                unnormalize_tensor_to_img(image_tensor[i])
-            )
-        return image_numpy
-    
+    """
+    image_tensor: input tensor of size b,c,h,w or b,t,c,h,w 
+    returns list of normalised h,w,c images
+    """
+
     if len(image_tensor.size()) == 5:
         # bs, T, channel, width,height
-        # 128,1000,1,256,256
-        
+        # 128,1000,1,256,256 
+        final_images = []  
+        print(f'Within function Tensor Sixe: {image_tensor.size()}')
         for batch in range(image_tensor.size()[0]):
-            image_numpy = []
             for t in range(image_tensor.size()[1]):
-                image_numpy.append(
-                unnormalize_tensor_to_img(image_tensor[batch,t,:,:,:])
-            )
-        return image_numpy
-
+                image_numpy =  image_tensor[batch,t,:,:]
+                image_numpy = image_numpy.cpu().float().numpy()
+                image_numpy = np.transpose(image_numpy,(1,2,0)) 
+                image_numpy = image_numpy * 65535.0
+                final_images.append(image_numpy.astype(imtype))
+    
     if len(image_tensor.size()) == 4:
         # bs,channel, width,height
-        # 128,1,256,256
-        
+        # 128,1,256,256 
+        final_images = []  
         for batch in range(image_tensor.size()[0]):
-            image_numpy = []
-            for t in range(image_tensor.size()[1]):
-                image_numpy.append(
-                unnormalize_tensor_to_img(image_tensor[batch,:,:,:])
-            )
-        return image_numpy
+                image_numpy =  image_tensor[batch,:,:,:]
+                image_numpy = image_numpy.cpu().float().numpy()
+                image_numpy = image_numpy.transpose() 
+                image_numpy = image_numpy * 65535.0
+                final_images.append(image_numpy.astype(imtype))
+    # if isinstance(image_tensor, list):
+    #     image_numpy = []
+    #     for i in range(len(image_tensor)):
+    #         image_numpy.append(
+    #             unnormalize_tensor_to_img(image_tensor[i])
+    #         )
+    
+    if len(image_tensor.size()) == 3:
+        # bs,channel, width,height
+        # 128,1,256,256 
+        final_images = []  
+        image_numpy =  image_tensor
+        image_numpy = image_numpy.cpu().float().numpy()
+        image_numpy = image_numpy.transpose() 
+        image_numpy = image_numpy * 65535.0
+        final_images.append(image_numpy.astype(imtype))
 
-
-    image_numpy = image_tensor.cpu().float().numpy()
-    # if normalise:
-        # print(f'pre tranpose shape: {image_numpy.shape}')
-    image_numpy = np.transpose(image_numpy, (1, 2, 0)) * 65535.0
-    # if image_numpy.shape[2] == 1 or image_numpy.shape[2] > 3:
-    #     image_numpy = image_numpy[:, :, 0]
-    return image_numpy.astype(imtype)
+    return final_images
 
 def print_params(net):
     if isinstance(net,list):
@@ -118,3 +125,32 @@ def print_params(net):
         num_params += params.numel()
     print(f'Total Number of params {num_params}')
     return num_params
+
+
+def sample_grid(samples):
+    f, ax = plt.subplots(figsize=(10,4))
+    grid_img = make_grid(samples,padding=True, pad_value=1)
+    return torchvision.transforms.ToPILImage()(grid_img)
+
+   
+def diffusion_proccess(time_steps,noisey_samples):
+    """
+    time_steps: fixed number of time steps chosen (eg. 250)
+    noisey_samples: list of images from 250,259...1 for all batches. BS 3 = len(noisey_samples(750))
+    """
+    # Extract diffusion per image
+    noisey_sample_per_img = [
+        list(noisey_samples[i:i+len(time_steps)]) 
+        for i in range(0,len(noisey_samples),len(time_steps))]
+    
+    fig, ax = plt.subplots(len(noisey_sample_per_img),len(time_steps),figsize=(10,5))    # Extract diffusion between batch elements
+    for row,j in enumerate(noisey_sample_per_img):
+        for col, (time_step, img) in enumerate(zip(time_steps,j)):
+            ax[row,col].imshow(img,cmap='gray')
+            ax[row,col].set_title(f't={time_step}',fontsize=8)
+            ax[row,col].axis('off')
+            ax[row,col].grid(False)
+    plt.suptitle("Diffusion Process", y=0.9)
+    plt.axis('off')
+    return fig
+
