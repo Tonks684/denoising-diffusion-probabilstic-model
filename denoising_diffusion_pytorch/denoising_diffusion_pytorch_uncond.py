@@ -459,7 +459,7 @@ class GaussianDiffusion(nn.Module):
         register_buffer('alphas_cumprod', alphas_cumprod)
         register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
 
-        # calculations for diffusion q(x_t | x_{t-1}) and others
+        # calculations for forward diffusion q(x_t | x_{t-1}) and others
 
         register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
         register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
@@ -550,6 +550,9 @@ class GaussianDiffusion(nn.Module):
         return ModelPrediction(pred_noise, x_start)
 
     def p_mean_variance(self, x, t, x_self_cond = None, clip_denoised = True):
+        """
+        Forward Diffusion
+        """
         preds = self.model_predictions(x, t, x_self_cond)
         x_start = preds.pred_x_start
 
@@ -912,9 +915,6 @@ class Trainer(object):
 
                     data_load_start = time.time()
                     data_B = next(self.dl_B).to(device)
-                    print('---Data B----')
-                    print(data_B.shape)
-                    print(len(data_B))
                     data_load_finish = time.time()
                     data_load_time = data_load_finish - data_load_start
                     with self.accelerator.autocast():
