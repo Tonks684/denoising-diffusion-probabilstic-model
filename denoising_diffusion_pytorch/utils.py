@@ -156,7 +156,7 @@ def diffusion_proccess(time_steps,noisey_samples):
     fig, ax = plt.subplots(len(noisey_sample_per_img),len(noisey_sample_per_img[0]),figsize=(10,5))    # Extract diffusion between batch elements
     # Image within batch
     for row, j in enumerate(len(noisey_sample_per_img)):
-        |# Diffused step t per image
+    # Diffused step t per image
         for col, (time_step, img) in enumerate(zip(time_steps,j)):
             ax[row,col].imshow(img,cmap='gray')
             ax[row,col].set_title(f't={time_step}',fontsize=8)
