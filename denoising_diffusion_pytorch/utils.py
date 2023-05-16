@@ -146,7 +146,7 @@ def diffusion_proccess(time_steps,noisey_samples):
     if len(noisey_sample_per_img[0]) > 10:
             subset_timesteps = len(noisey_sample_per_img[0]) // 25
             noisey_sample_per_img = [
-                noisey_sample_per_img[0][i+subset_timesteps] 
+                noisey_sample_per_img[0][i+subset_timesteps-1] 
                 for i in range(0, len(noisey_sample_per_img[0]), subset_timesteps)]
 
     print(f'Diffusion Debugging! {len(noisey_sample_per_img)} Len of noisey samples ')
