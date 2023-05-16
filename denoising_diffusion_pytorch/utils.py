@@ -141,18 +141,14 @@ def diffusion_proccess(time_steps,noisey_samples):
     noisey_sample_per_img = [
         list(noisey_samples[i:i+len(time_steps)]) 
         for i in range(0,len(noisey_samples),len(time_steps))]
-    print(f'------{noisey_sample_per_img[0][1].shape}')
     # Extract subset of timesteps
     if len(noisey_sample_per_img[0]) > 10:
             subset_timesteps = len(noisey_sample_per_img[0]) // 25
             noisey_sample_per_img = [
-                noisey_sample_per_img[0][i+subset_timesteps-1] 
+                noisey_sample_per_img[0][i*subset_timesteps] 
                 for i in range(0, len(noisey_sample_per_img[0]), subset_timesteps)]
 
-    print(f'Diffusion Debugging! {len(noisey_sample_per_img)} Len of noisey samples ')
-    print(f'Diffusion Debugging! {len(noisey_sample_per_img[0])} Len of noisey samples ')
-    # print(noisey_sample_per_img)
-    
+
     fig, ax = plt.subplots(len(noisey_sample_per_img),len(noisey_sample_per_img[0]),figsize=(10,5))    # Extract diffusion between batch elements
     # Image within batch
     for row, j in enumerate(len(noisey_sample_per_img)):
