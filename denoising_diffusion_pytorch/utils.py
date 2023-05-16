@@ -141,6 +141,7 @@ def diffusion_proccess(time_steps,noisey_samples):
     noisey_sample_per_img = [
         list(noisey_samples[i:i+len(time_steps)]) 
         for i in range(0,len(noisey_samples),len(time_steps))]
+    print(noisey_sample_per_img[0].shape)
     # Extract subset of timesteps
     if len(noisey_sample_per_img[0]) > 10:
             subset_timesteps = len(noisey_sample_per_img[0]) // 25
