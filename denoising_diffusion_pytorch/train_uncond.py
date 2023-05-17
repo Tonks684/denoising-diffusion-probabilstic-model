@@ -15,10 +15,10 @@ num_params = utils.print_params(model)
 # # W&D Logging
 config = vars(opt)
 config.update({'number_of_params': num_params})
-wandb.init(config=config)
+wandb_ = wandb.init(config=config)
         
 # W&D Init
-trainer = Trainer(diffusion,opt)
+trainer = Trainer(diffusion,opt,wandb_)
 
 # Begin Training
 trainer.train()
