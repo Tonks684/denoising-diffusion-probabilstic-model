@@ -516,6 +516,9 @@ class GaussianDiffusion(nn.Module):
         )
 
     def q_posterior(self, x_start, x_t, t):
+        """
+        Forward Process
+        """
         posterior_mean = (
             extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
             extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
@@ -551,7 +554,7 @@ class GaussianDiffusion(nn.Module):
 
     def p_mean_variance(self, x, t, x_self_cond = None, clip_denoised = True):
         """
-        Forward Diffusion
+        Reverse Process
         """
         preds = self.model_predictions(x, t, x_self_cond)
         x_start = preds.pred_x_start
@@ -896,7 +899,6 @@ class Trainer(object):
     def train(self):
 
         # W&B 
-        wandb.init(config=vars(self.opt))
         # wandb.watch(self.model,log_freq=1000)
         
 
@@ -966,8 +968,8 @@ class Trainer(object):
                         
                         # Save W&B
                         wandb.log({
-                            'target_1': wandb.Image(plt.imshow(np.transpose(data_B[0],(1,2,0)),cmap='gray'), caption= "Ground Truth Target 1"),
-                            'target_2': wandb.Image(plt.imshow(np.transpose(data_B[2],(1,2,0)),cmap='gray'), caption= "Ground Truth Target 2"),
+                            'target_1': wandb.Image(plt.imshow(data_B[0],cmap='gray'), caption= "Ground Truth Target 1"),
+                            'target_2': wandb.Image(plt.imshow(data_B[2],cmap='gray'), caption= "Ground Truth Target 2"),
                             'sample_1': wandb.Image(plt.imshow(samples[0],cmap='gray'), caption= "Sample Prediction 1"),
                             'sample_2': wandb.Image(plt.imshow(samples[1],cmap='gray'), caption= "Sample Prediction 2"),
                             'sample Histogram': wandb.Histogram(samples[0])
