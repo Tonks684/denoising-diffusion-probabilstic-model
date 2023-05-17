@@ -147,8 +147,8 @@ def diffusion_proccess(time_steps,noisey_samples):
             noisey_sample_per_img = [
                 noisey_sample_per_img[0][i:i+25][0] 
                 for i in range(0, len(noisey_sample_per_img[0]), subset_timesteps)]
-            print(f'len timesteps {len(subset_timesteps)}')
-            print(f'noisey samples {len}')
+            print(f'len timesteps {subset_timesteps}')
+            print(f'noisey samples {len(noisey_sample_per_img)}')
     fig, ax = plt.subplots(len(noisey_sample_per_img),len(noisey_sample_per_img[0]),figsize=(10,5))    # Extract diffusion between batch elements
     # Image within batch
     for row, j in enumerate(len(noisey_sample_per_img)):
