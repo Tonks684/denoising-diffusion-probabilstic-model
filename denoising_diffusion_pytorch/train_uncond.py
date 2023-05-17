@@ -2,7 +2,7 @@ from denoising_diffusion_pytorch_uncond import Unet, GaussianDiffusion, Trainer
 import os
 from base_options import BaseOptions
 import utils
-
+import wandb
 
 # Parse baseoptions and any overwrites
 opt = BaseOptions().parse()
