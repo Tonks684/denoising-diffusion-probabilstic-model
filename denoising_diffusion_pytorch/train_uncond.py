@@ -18,7 +18,7 @@ config.update({'number_of_params': num_params})
 wandb_ = wandb.init(config=config)
         
 # W&D Init
-trainer = Trainer(diffusion,opt,wandb_)
+trainer = Trainer(diffusion,wandb_,opt)
 
 # Begin Training
 trainer.train()
