@@ -766,9 +766,13 @@ class Trainer(object):
     def __init__(
         self,
         diffusion_model,
+        wandb,
         opt,
     ):
         super().__init__()
+
+        # wandb
+        self.wandb = wandb
 
         # accelerator
         self.opt = opt
@@ -928,7 +932,7 @@ class Trainer(object):
                         # loss_compute
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss.item()
-                        wandb.log({
+                        self.wandb.log({
                             'loss':loss.item(),
                             'data_load_time': data_load_time,
                             'epoch_time': iteration_time
@@ -967,7 +971,7 @@ class Trainer(object):
                             # imsave(self.results_folder, f'/stacks/sample_stack_index_{index}.tiff', img.astype(np.float32), imagej=True)
                         
                         # Save W&B
-                        wandb.log({
+                        self.wandb.log({
                             'target_1': wandb.Image(plt.imshow(data_B[0],cmap='gray'), caption= "Ground Truth Target 1"),
                             'target_2': wandb.Image(plt.imshow(data_B[2],cmap='gray'), caption= "Ground Truth Target 2"),
                             'sample_1': wandb.Image(plt.imshow(samples[0],cmap='gray'), caption= "Sample Prediction 1"),
@@ -979,7 +983,7 @@ class Trainer(object):
                         if exists(self.inception_v3):
                             fid_score = self.fid_score(real_samples = data_B, fake_samples = all_images)
                             accelerator.print(f'fid_score: {fid_score}')
-                            wandb.log({'fid':fid_score})
+                            self.wandb.log({'fid':fid_score})
                         
 
 
