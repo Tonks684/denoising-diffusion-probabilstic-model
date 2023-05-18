@@ -132,33 +132,36 @@ def sample_grid(samples):
     return torchvision.transforms.ToPILImage()(grid_img)
 
    
-def diffusion_proccess(time_steps,noisey_samples):
+def diffusion_proccess(time_steps:list,noisey_samples:list,diffusion_steps_shown:int):
     """
     time_steps: fixed number of time steps chosen (eg. 250)
-    noisey_samples: list of images from 250,249...1 for all batches. BS 3 = len(noisey_samples(750))
+    noisey_samples: list of images across all batches
+    diffusion_steps_shown: Subset of all timesteps to be plotted
     """
-    # Extract diffusion per image
+    print(len(time_steps)) # 51
+    print('----')
+    print(len(noisey_samples)) # 153
+    print('----')
+    print(len(noisey_samples[0])) # 64
+    # Extract images into seperate list 
     noisey_sample_per_img = [
         list(noisey_samples[i:i+len(time_steps)]) 
         for i in range(0,len(noisey_samples),len(time_steps))]
-    # Extract subset of timesteps
-    if len(noisey_sample_per_img[0]) > 10:
-            subset_timesteps = len(noisey_sample_per_img[0]) // 25
-            noisey_sample_per_img = [
-                noisey_sample_per_img[0][i:i+25][0] 
-                for i in range(0, len(noisey_sample_per_img[0]), subset_timesteps)]
-            # print(f'len timesteps {subset_timesteps}')
-            # print(f'noisey samples {len(noisey_sample_per_img)}')
-    fig, ax = plt.subplots(len(noisey_sample_per_img),len(noisey_sample_per_img[0]),figsize=(10,5))    # Extract diffusion between batch elements
+    # Extract subset of timesteps if n   
+    fig, ax = plt.subplots(len(noisey_sample_per_img),diffusion_steps_shown+1,figsize=(10,5))    # Extract diffusion between batch elements
     # Image within batch
     for row, batch in enumerate(noisey_sample_per_img):
+        num_steps = len(batch) // diffusion_steps_shown
+        noisey_sample_per_img_subset = [
+            list(noisey_sample_per_img[row][i]) for i in range(0,len(noisey_sample_per_img[0]),num_steps)]
     # Diffused step t per image
-        for col, (time_step, img) in enumerate(zip(time_steps,batch)):
+        for col, img in enumerate(noisey_sample_per_img_subset):
             ax[row,col].imshow(img,cmap='gray')
-            ax[row,col].set_title(f't={time_step}',fontsize=8)
+            ax[row,col].set_title(f't={col*num_steps}',fontsize=8)
             ax[row,col].axis('off')
             ax[row,col].grid(False)
-    plt.suptitle("Diffusion Process", y=0.9)
+    # plt.title("Reverse Diffusion Process")
     plt.axis('off')
+    # plt.savefig('diffusion_test.png')
     return fig
 

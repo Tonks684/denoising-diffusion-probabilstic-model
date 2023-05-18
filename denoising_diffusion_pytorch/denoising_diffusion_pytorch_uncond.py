@@ -638,7 +638,7 @@ class GaussianDiffusion(nn.Module):
         all_samples = torch.stack(imgs, dim = 1)
         all_samples = self.unnormalize(all_samples)
         samples_in_orig_format = self.tensor2img(all_samples)
-        sample_img_grid_fig = diffusion_proccess(times,samples_in_orig_format)
+        sample_img_grid_fig = diffusion_proccess(times,samples_in_orig_format,diffusion_steps_shown=10)
         wandb.log({'sample_grid': sample_img_grid_fig})
                             
         return final_sample_batch
@@ -971,13 +971,13 @@ class Trainer(object):
                             # imsave(self.results_folder, f'/stacks/sample_stack_index_{index}.tiff', img.astype(np.float32), imagej=True)
                         
                         # Save W&B
-                        self.wandb.log({
-                            'target_1': wandb.Image(plt.imshow(data_B[0],cmap='gray'), caption= "Ground Truth Target 1"),
-                            'target_2': wandb.Image(plt.imshow(data_B[2],cmap='gray'), caption= "Ground Truth Target 2"),
-                            'sample_1': wandb.Image(plt.imshow(samples[0],cmap='gray'), caption= "Sample Prediction 1"),
-                            'sample_2': wandb.Image(plt.imshow(samples[1],cmap='gray'), caption= "Sample Prediction 2"),
-                            'sample Histogram': wandb.Histogram(samples[0])
-                            })
+                        # self.wandb.log({
+                        #     'target_1': wandb.Image(plt.imshow(data_B[0],cmap='gray'), caption= "Ground Truth Target 1"),
+                        #     'target_2': wandb.Image(plt.imshow(data_B[2],cmap='gray'), caption= "Ground Truth Target 2"),
+                        #     'sample_1': wandb.Image(plt.imshow(samples[0],cmap='gray'), caption= "Sample Prediction 1"),
+                        #     'sample_2': wandb.Image(plt.imshow(samples[1],cmap='gray'), caption= "Sample Prediction 2"),
+                        #     'sample Histogram': wandb.Histogram(samples[0])
+                        #     })
                         
                         # whether to calculate fid
                         if exists(self.inception_v3):
