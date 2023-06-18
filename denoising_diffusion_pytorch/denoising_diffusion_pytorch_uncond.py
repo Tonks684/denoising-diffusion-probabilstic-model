@@ -40,7 +40,6 @@ ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 # Visualisation functions
 
 def sample_grid(samples):
-    f, ax - plt.subplots(figsize=(10,4))
     grid_img = make_grid(samples,padding=True, pad_value=1)
     return torchvision.transforms.ToPILImage()(grid_img)
         
@@ -745,11 +744,13 @@ class Dataset(Dataset):
         self.folder = opt.folder_B
         self.paths = [p for ext in opt.exts for p in
                     Path(f'{opt.folder_B}').glob(f'*.{ext}')]
+        transform_list = []
+        if opt.image_size != opt.original_image_size:
+            transform_list.append(T.Resize(opt.image_size,T.InterpolationMode.BICUBIC ))
         
-        self.transform = T.Compose([
-            T.ToTensor(),
-            T.Normalize((0.5,), (0.5,))
-        ])
+        transform_list += [T.ToTensor(),T.Normalize((0.5,), (0.5,))]
+        self.transform = T.Compose(transform_list)
+        
 
     def __len__(self):
         return len(self.paths)
